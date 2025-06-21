@@ -7,6 +7,7 @@ require('dotenv').config();
 const cliProgress = require('cli-progress');
 const fs = require('fs');
 const fetch = require('node-fetch');
+const db = require('./lib/db');
 
 token = process.env.TOKEN;
 appid = process.env.APPID;
@@ -15,7 +16,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-const ServerCheck = 'https://pancakesmp.ddns.net';
+const ServerCheck = 'http://192.168.178.204/server';
 
 let statusNote = 'Currently still empty, waiting for changes...';
 let statusMessage = null;
@@ -112,6 +113,39 @@ const commands = [
       }
     ],
     Permissions: 'ADMINISTRATOR'
+  },
+  {
+    name: 'downtimes',
+    description: 'Show the last N downtimes (offline events).',
+    options: [
+      {
+        name: 'number',
+        description: 'How many downtimes to show (default 5)',
+        type: 4,
+        required: false
+      }
+    ]
+  },
+  {
+    name: 'statusnotes',
+    description: 'Show the last N status notes.',
+    options: [
+      {
+        name: 'number',
+        description: 'How many notes to show (default 5)',
+        type: 4,
+        required: false
+      }
+    ]
+  },
+  {
+    name: 'currenttime',
+    description: 'Show the current time in 24 hour format with seconds.'
+  },
+  {
+    name: 'refresh',
+    description: 'Immediately refresh the server status (admin only).',
+    Permissions: 'ADMINISTRATOR'
   }
 ];
 
@@ -178,8 +212,24 @@ function buildStatusEmbed(isOnline) {
       { name: 'Last updated', value: lastUpdateTime ? getTime24h(lastUpdateTime) : getTime24h(), inline: true },
       { name: 'Next update at', value: getNextUpdateTime(), inline: true }
     )
-    // .setFooter({ text: 'Made by bananenmann187' })
     .setTimestamp();
+}
+
+async function updateServerStatus(statusChannel) {
+  const prevStatus = lastStatus;
+  lastStatus = await checkServerStatus();
+  lastUpdateTime = new Date();
+  const embed = buildStatusEmbed(lastStatus);
+  if (statusMessage && statusMessage.editable !== false) {
+    await statusMessage.edit({ embeds: [embed] });
+    await cleanStatusChannel(statusChannel, statusMessage);
+  } else {
+    statusMessage = await statusChannel.send({ embeds: [embed] });
+    await cleanStatusChannel(statusChannel, statusMessage);
+  }
+  if (prevStatus !== null && prevStatus !== lastStatus) {
+    db.logStatusChange(lastStatus ? 'online' : 'offline', statusNote);
+  }
 }
 
 client.once('ready', async () => {
@@ -227,16 +277,7 @@ client.once('ready', async () => {
     await cleanStatusChannel(statusChannel, statusMessage);
 
     setInterval(async () => {
-      lastStatus = await checkServerStatus();
-      lastUpdateTime = new Date();
-      const embed = buildStatusEmbed(lastStatus);
-      if (statusMessage && statusMessage.editable !== false) {
-        await statusMessage.edit({ embeds: [embed] });
-        await cleanStatusChannel(statusChannel, statusMessage);
-      } else {
-        statusMessage = await statusChannel.send({ embeds: [embed] });
-        await cleanStatusChannel(statusChannel, statusMessage);
-      }
+      await updateServerStatus(statusChannel);
     }, updateInterval);
 
     console.log('🌌・server-status channel checked and (re)created.');
@@ -268,7 +309,7 @@ client.on('interactionCreate', async interaction => {
 
   if (commandName === 'statusnote') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
-      return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
+      return interaction.reply({ content: 'You do not have permission to use this command.', flags: 64 });
     }
     const custom = args.getString('custom');
     const preset = args.getString('preset');
@@ -284,8 +325,55 @@ client.on('interactionCreate', async interaction => {
       await statusMessage.edit({ embeds: [embed] });
       await cleanStatusChannel(statusMessage.channel, statusMessage);
     }
-    await interaction.reply({ content: 'Status note updated!', ephemeral: true });
+    await interaction.reply({ content: 'Status note updated!', flags: 64 });
+  }
+
+  if (commandName === 'downtimes') {
+    const num = args.getInteger('number') || 5;
+    db.getLastDowntimes(num, (err, rows) => {
+      if (err) {
+        return interaction.reply({ content: 'Error fetching downtimes.', flags: 64 });
+      }
+      if (!rows.length) {
+        return interaction.reply({ content: 'No downtimes found.', flags: 64 });
+      }
+      const msg = rows.map(r => `• ${r.timestamp}: ${r.note || 'No note'}`).join('\n');
+      interaction.reply({ content: `Last ${rows.length} downtimes:\n${msg}`, flags: 64 });
+    });
+  }
+
+  if (commandName === 'statusnotes') {
+    const num = args.getInteger('number') || 5;
+    db.getLastStatusNotes(num, (err, rows) => {
+      if (err) {
+        return interaction.reply({ content: 'Error fetching status notes.', flags: 64 });
+      }
+      if (!rows.length) {
+        return interaction.reply({ content: 'No status notes found.', flags: 64 });
+      }
+      const msg = rows.map(r => `• ${r.timestamp}: ${r.note} (${r.status})`).join('\n');
+      interaction.reply({ content: `Last ${rows.length} status notes:\n${msg}`, flags: 64 });
+    });
+  }
+
+  if (commandName === 'currenttime') {
+    const time = getCurrentTime();
+    await interaction.reply({ content: `The current time is: **${time}**`, flags: 64 });
+  }
+
+  if (commandName === 'refresh') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: 'You do not have permission to use this command.', flags: 64 });
+    }
+    const channel = statusMessage ? statusMessage.channel : null;
+    if (!channel) {
+      return interaction.reply({ content: 'Status channel not found.', flags: 64 });
+    }
+    await updateServerStatus(channel);
+    await interaction.reply({ content: 'Status refreshed!', flags: 64 });
   }
 });
 
-client.login(token);
+db.init(() => {
+  client.login(token);
+});
