@@ -7,7 +7,7 @@ require('dotenv').config();
 const cliProgress = require('cli-progress');
 const fs = require('fs');
 const fetch = require('node-fetch');
-
+//test
 token = process.env.TOKEN;
 appid = process.env.APPID;
 
